@@ -10,105 +10,61 @@
     .dashboard-hero {
         position: relative;
         overflow: hidden;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        background:
-            radial-gradient(circle at top right, rgba(96, 165, 250, 0.32), transparent 28%),
-            radial-gradient(circle at 20% 20%, rgba(59, 130, 246, 0.28), transparent 24%),
-            linear-gradient(135deg, #172033 0%, #24304a 52%, #1b4ed8 100%);
-        color: #fff;
-    }
-
-    .dashboard-hero .section-note,
-    .dashboard-hero .text-muted {
-        color: rgba(255, 255, 255, 0.74) !important;
+        border: 1px solid var(--line-soft);
+        background: var(--bg-surface);
+        color: var(--text-main);
     }
 
     .dashboard-hero-grid {
         display: grid;
         grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.95fr);
-        gap: 1.5rem;
+        gap: 0;
         align-items: stretch;
     }
 
     .dashboard-hero-copy {
-        padding: 2rem;
+        padding: 1.25rem;
     }
 
     .dashboard-hero-title {
-        font-size: 2.35rem;
-        line-height: 1.02;
-        letter-spacing: -0.04em;
-        font-weight: 800;
-        margin: 0 0 0.9rem;
-        max-width: 12ch;
+        font-size: 1.5rem;
+        line-height: 1.3;
+        letter-spacing: -0.02em;
+        font-weight: 650;
+        margin: 0 0 0.65rem;
+        max-width: 36ch;
     }
 
     .dashboard-hero-actions {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.75rem;
-        margin-top: 1.5rem;
-    }
-
-    .dashboard-hero-actions .btn {
-        min-width: 190px;
-    }
-
-    .dashboard-hero-actions .ops-btn {
-        min-height: 46px;
-        border-radius: 14px;
-        box-shadow: 0 16px 30px rgba(15, 23, 42, 0.16);
-    }
-
-    .dashboard-hero-actions .ops-btn-primary {
-        background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
-        border-color: rgba(255, 255, 255, 0.4);
-        color: #173ea6;
-    }
-
-    .dashboard-hero-actions .ops-btn-primary:hover,
-    .dashboard-hero-actions .ops-btn-primary:focus {
-        background: linear-gradient(135deg, #ffffff 0%, #eff6ff 100%);
-        border-color: rgba(255, 255, 255, 0.72);
-        color: #12358c;
-    }
-
-    .dashboard-hero-actions .ops-btn-secondary {
-        background: rgba(255, 255, 255, 0.08);
-        border-color: rgba(255, 255, 255, 0.18);
-        color: #fff;
-        backdrop-filter: blur(10px);
-    }
-
-    .dashboard-hero-actions .ops-btn-secondary:hover,
-    .dashboard-hero-actions .ops-btn-secondary:focus {
-        background: rgba(255, 255, 255, 0.14);
-        border-color: rgba(255, 255, 255, 0.32);
-        color: #fff;
+        gap: 0.5rem;
+        margin-top: 1rem;
     }
 
     .dashboard-hero-meta {
         display: grid;
-        gap: 1rem;
-        padding: 2rem;
-        background: rgba(255, 255, 255, 0.08);
-        border-left: 1px solid rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(10px);
+        gap: 0.85rem;
+        padding: 1.25rem;
+        background: #fafaf7;
+        border-left: 1px solid var(--line-soft);
     }
 
     .hero-metric {
-        padding: 1rem;
-        border-radius: 18px;
-        background: rgba(255, 255, 255, 0.08);
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 0 0 0.85rem;
+        border-bottom: 1px solid var(--line-soft);
+    }
+
+    .hero-metric:last-child {
+        padding-bottom: 0;
+        border-bottom: 0;
     }
 
     .hero-metric-label {
         font-size: 0.84rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: rgba(255, 255, 255, 0.68);
-        margin-bottom: 0.5rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        margin-bottom: 0.35rem;
     }
 
     .hero-metric-value {
@@ -129,21 +85,18 @@
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
-        padding: 0.7rem 0.95rem;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.12);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        color: #fff;
+        padding: 0.45rem 0;
+        color: var(--brand);
         text-decoration: none;
     }
 
     .dashboard-quick-link:hover {
-        color: #fff;
-        background: rgba(255, 255, 255, 0.18);
+        color: var(--brand-dark);
+        text-decoration: underline;
     }
 
     .dashboard-kpi-card {
-        border-radius: 22px;
+        border-radius: var(--radius-lg);
         overflow: hidden;
     }
 
@@ -156,9 +109,9 @@
     }
 
     .dashboard-kpi-icon {
-        width: 52px;
-        height: 52px;
-        border-radius: 16px;
+        width: 36px;
+        height: 36px;
+        border-radius: 7px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -166,7 +119,7 @@
     }
 
     .dashboard-kpi-value {
-        font-size: 2rem;
+        font-size: 1.6rem;
         line-height: 1;
         letter-spacing: -0.04em;
         font-weight: 800;
@@ -180,37 +133,37 @@
 
     .dashboard-action-grid {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 1rem;
     }
 
     .dashboard-action-card {
         border: 1px solid var(--line-soft);
-        border-radius: 22px;
-        padding: 1.35rem;
-        background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+        border-radius: var(--radius-md);
+        padding: 1rem;
+        background: var(--bg-surface);
         height: 100%;
     }
 
     .dashboard-action-card h5 {
-        margin-top: 1rem;
+        margin-top: 0.65rem;
         margin-bottom: 0.45rem;
     }
 
     .dashboard-action-icon {
-        width: 56px;
-        height: 56px;
-        border-radius: 18px;
+        width: 32px;
+        height: 32px;
+        border-radius: 7px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        font-size: 1.35rem;
+        font-size: 1rem;
     }
 
     .dashboard-status-card {
         border: 1px solid var(--line-soft);
-        border-radius: 22px;
-        background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+        border-radius: var(--radius-lg);
+        background: var(--bg-surface);
         overflow: hidden;
     }
 
@@ -222,11 +175,11 @@
 
         .dashboard-hero-meta {
             border-left: 0;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            border-top: 1px solid var(--line-soft);
         }
 
         .dashboard-hero-title {
-            font-size: 1.85rem;
+            font-size: 1.35rem;
             max-width: none;
         }
     }

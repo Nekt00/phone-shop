@@ -7,5 +7,6 @@ staticfiles/
 *.log
 .DS_Store
 venv/
+.venv/
 *.xlsx
 parser_check.txt

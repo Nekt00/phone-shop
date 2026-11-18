@@ -32,7 +32,6 @@ class Aggregator:
         try:
             with transaction.atomic():
                 ProductPrice.objects.all().delete()
-                AggregatedProduct.objects.all().delete()
 
                 today = timezone.localdate()
 
@@ -79,7 +78,7 @@ class Aggregator:
                     groups[key]['products'].append(product)
 
                 for key, group in groups.items():
-                    aggregated = AggregatedProduct.objects.create(
+                    aggregated, _ = AggregatedProduct.objects.get_or_create(
                         category=group['category'],
                         brand=group['brand'],
                         model=group['model'],

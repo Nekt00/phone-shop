@@ -9,6 +9,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
+from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib import messages
 from decimal import Decimal, InvalidOperation
 from django.db.models import Q
@@ -66,7 +67,7 @@ def _mask_secret(value, keep_start=6, keep_end=4):
     if not value:
         return ''
     if len(value) <= keep_start + keep_end:
-        return value
+        return '***'
     return f'{value[:keep_start]}...{value[-keep_end:]}'
 
 
@@ -282,7 +283,6 @@ def index(request):
 
 
 def healthz(request):
-    process_due_cleanup_tasks(limit=5)
     return JsonResponse({'ok': True})
 
 
@@ -1104,6 +1104,7 @@ def product_detail(request, product_id):
 @login_required
 def run_aggregation(request):
     """Запуск агрегации вручную"""
+    from .aggregator import Aggregator
     if request.method == 'POST':
         results = Aggregator.aggregate_all()
         messages.success(request, f'Агрегация завершена. Создано {results["aggregated"]} уникальных товаров')
@@ -1229,13 +1230,6 @@ def send_telegram_pricelist(request):
             )
         )
 
-        deleted_count = 0
-        for publication in active_publications:
-            if publication.message_ids:
-                deleted_count += delete_telegram_messages(publication.message_ids)
-            publication.is_active = False
-            publication.save(update_fields=['is_active'])
-
         sent_messages = send_telegram_messages(text, reply_markup=get_channel_entry_keyboard())
         TelegramPublication.objects.create(
             kind=TelegramPublication.KIND_PRICE,
@@ -1244,6 +1238,17 @@ def send_telegram_pricelist(request):
             sent_by=request.user,
             is_active=True,
         )
+
+        deleted_count = 0
+        for publication in active_publications:
+            publication.is_active = False
+            publication.save(update_fields=['is_active'])
+            try:
+                if publication.message_ids:
+                    deleted_count += delete_telegram_messages(publication.message_ids)
+            except Exception:
+                logger.exception('Could not remove previous Telegram publication %s', publication.pk)
+                messages.warning(request, 'Новый прайс опубликован, но предыдущий не удалось удалить.')
 
         if deleted_count:
             messages.info(request, f'Удалено предыдущих сообщений прайса: {deleted_count}')
@@ -1302,7 +1307,7 @@ def ui_preview(request):
     return render(request, 'operators/ui_preview.html')
 
 
-@login_required
+@staff_member_required
 def telegram_debug_log(request):
     if TELEGRAM_DEBUG_LOG_PATH.exists():
         content = TELEGRAM_DEBUG_LOG_PATH.read_text(encoding='utf-8')
@@ -1315,7 +1320,7 @@ def telegram_debug_log(request):
     })
 
 
-@login_required
+@staff_member_required
 def env_debug(request):
     bot_token = getattr(settings, 'TELEGRAM_BOT_TOKEN', '').strip()
     token_prefix = bot_token.split(':', 1)[0] if ':' in bot_token else ''
