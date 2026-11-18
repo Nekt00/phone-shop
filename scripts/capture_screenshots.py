@@ -28,14 +28,14 @@ def main():
     errors = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        context = browser.new_context(viewport={'width': 1440, 'height': 1000}, device_scale_factor=1)
+        context = browser.new_context(viewport={'width': 1440, 'height': 1000}, device_scale_factor=1, reduced_motion='reduce')
         page = context.new_page()
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.goto('http://127.0.0.1:8011/login/', wait_until='networkidle')
         page.screenshot(path=str(directory / 'login.png'), full_page=True)
         context.add_cookies([{'name': settings.SESSION_COOKIE_NAME, 'value': client.cookies[settings.SESSION_COOKIE_NAME].value,
                              'domain': '127.0.0.1', 'path': '/'}])
-        pages = [('dashboard', '/operators/'), ('catalog', '/operators/upload/?mode=manual'),
+        pages = [('dashboard', '/operators/'), ('import', '/operators/upload/'), ('catalog', '/operators/upload/?mode=manual'),
                  ('comparison', '/operators/comparison/'), ('telegram-price', '/operators/telegram-price/'),
                  ('requests', '/operators/telegram-requests/')]
         for name, path in pages:
@@ -53,6 +53,8 @@ def main():
                 page.evaluate('generateTelegramText()')
                 text = page.locator('#telegramOutput').input_value()
                 assert 'Galaxy S25' in text and '17 Pro Max' in text, text
+                page.evaluate("window.scrollTo({top: document.getElementById('telegramOutputCard').getBoundingClientRect().top + scrollY - 80, behavior: 'instant'})")
+                page.screenshot(path=str(directory / 'telegram-output.png'), full_page=False)
                 page.evaluate('window.scrollTo(0, 0)')
             page.screenshot(path=str(directory / f'{name}.png'), full_page=False)
             print(f'OK {name}')
