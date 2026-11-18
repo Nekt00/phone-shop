@@ -40,39 +40,47 @@
         background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
     }
 
-    .builder-action-btn {
-        min-height: 72px;
+    .builder-settings-toolbar {
         display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 0.75rem;
+    }
+
+    .builder-markup-field {
+        width: 120px;
+    }
+
+    .builder-settings-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    .builder-action-btn {
+        display: inline-flex;
         align-items: center;
         justify-content: center;
         text-align: center;
-        line-height: 1.2;
     }
 
     .builder-action-btn-primary {
-        min-height: 72px;
-        box-shadow: 0 14px 30px rgba(29, 78, 216, 0.18);
+        box-shadow: none;
     }
 
     .builder-action-btn-secondary {
-        min-height: 72px;
-        background: #f8fbff;
-        border-color: #d8e4ff;
-        color: #1d4ed8;
+        background: var(--bg-surface);
+        border-color: var(--line-soft);
+        color: var(--text-main);
     }
 
-    .builder-action-btn-secondary:hover {
-        background: #eef4ff;
-        border-color: #bfd4ff;
-        color: #1d4ed8;
-    }
-
+    .builder-action-btn-secondary:hover,
     .builder-action-btn-secondary:focus,
     .builder-action-btn-secondary:active,
     .builder-action-btn-secondary.show {
-        background: #eef4ff;
-        border-color: #bfd4ff;
-        color: #1d4ed8;
+        background: var(--bg-soft);
+        border-color: var(--brand);
+        color: var(--brand-dark);
     }
 
     .builder-card {
@@ -153,8 +161,9 @@
     }
 
     .builder-publish-actions {
-        display: grid;
-        gap: 0.75rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
     }
 
     .builder-help-list {
@@ -229,6 +238,7 @@
     }
 </style>
 
+<div class="telegram-builder">
 <div class="card page-hero-card mb-4">
     <div class="builder-hero-grid">
         <div class="builder-hero-main">
@@ -274,25 +284,19 @@
         <h5 class="card-title mb-0">Параметры прайса</h5>
     </div>
     <div class="card-body p-4">
-        <div class="row g-3 align-items-end">
-            <div class="col-xl-3 col-md-6">
+        <div class="builder-settings-toolbar">
+            <div class="builder-markup-field">
                 <label class="form-label fw-bold">Наценка, %</label>
                 <input type="number" id="markupPercent" class="form-control" value="3" step="0.1" min="0">
             </div>
 
-            <div class="col-xl-3 col-md-6 d-grid">
+            <div class="builder-settings-actions">
                 <button type="button" class="btn btn-outline-primary builder-action-btn builder-action-btn-secondary" onclick="applyMarkup()">
                     <i class="bi bi-percent me-2"></i> Применить наценку
                 </button>
-            </div>
-
-            <div class="col-xl-3 col-md-6 d-grid">
                 <button type="button" class="btn btn-primary builder-action-btn builder-action-btn-primary" onclick="generateTelegramText()">
                     <i class="bi bi-magic me-2"></i> Сгенерировать прайс
                 </button>
-            </div>
-
-            <div class="col-xl-3 col-md-6 d-grid">
                 <button type="button"
                         class="btn btn-outline-secondary builder-action-btn builder-action-btn-secondary"
                         data-bs-toggle="collapse"
@@ -625,6 +629,7 @@
 
 
 
+</div>
 <script>
 function roundUpTo500(value) {
     return Math.ceil(value / 500) * 500;

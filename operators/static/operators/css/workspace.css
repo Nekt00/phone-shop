@@ -85,10 +85,24 @@ h5, .card-title { font-size: 1rem; font-weight: 650; line-height: 1.4; }
 .soft-note { background: #f6f7f3; border-color: var(--line-soft); border-radius: 7px; }
 .alert { box-shadow: none; border-radius: 7px; }
 
-.btn, .ops-btn, .btn.ops-btn-sm { border-radius: 7px; font-size: 0.875rem; font-weight: 600; }
-.btn { --bs-btn-padding-y: 0.45rem; --bs-btn-padding-x: 0.8rem; }
-.btn-sm, .btn.ops-btn-sm { font-size: 0.8rem; }
-.ops-btn { min-height: 36px; padding: 0.55rem 0.8rem; }
+.btn, .ops-btn, .ops-btn.ops-btn-sm, .btn-sm.ops-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    min-height: 36px;
+    padding: 0.45rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.35;
+    vertical-align: middle;
+}
+/* Button gap replaces old icon margins, including Bootstrap me-* utilities. */
+.btn > i, .btn > svg { flex-shrink: 0; margin-inline: 0 !important; }
+@media (min-width: 992px) {
+    .btn.sidebar-toggler { display: none; }
+}
 .btn-primary, .btn.ops-btn-primary {
     --bs-btn-disabled-bg: #176b64;
     --bs-btn-disabled-border-color: #176b64;
