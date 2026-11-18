@@ -1,8 +1,9 @@
 from datetime import timedelta
-import json
+import logging
 
 from django.conf import settings
 from django.utils import timezone
+from django.db import transaction
 
 from .models import (
     AggregatedProduct,
@@ -11,6 +12,7 @@ from .models import (
     TelegramCustomerMessage,
     TelegramCustomerRequest,
     TelegramPublication,
+    TelegramIncomingUpdate,
 )
 from .telegram_service import (
     answer_telegram_callback,
@@ -29,7 +31,7 @@ REQUEST_TYPE_LABELS = {
 }
 
 
-CLOSE_REQUEST_TEXT = '✅ Заявка закрыта. Через минуту чат будет очищен.'
+CLOSE_REQUEST_TEXT = '✅ Заявка закрыта. Сообщения будут удалены при ближайшей очистке.'
 CUSTOMER_CLOSED_REQUEST_NOTE = '[system] customer_closed_request'
 
 
@@ -79,18 +81,14 @@ def get_welcome_text():
     )
 
 
-def get_close_request_keyboard():
-    return {
-        'inline_keyboard': [
-            [
-                {'text': '✅ Закрыть текущую заявку', 'callback_data': 'menu:close_request'},
-            ],
-        ]
-    }
-
-
 def add_pending_chat_message_id(customer, message_id):
     if not message_id:
+        return
+
+    active = customer.requests.exclude(status__in=['done', 'cancelled']).order_by('created_at', 'id').first()
+    if active:
+        active.extra_message_ids = list(dict.fromkeys([*(active.extra_message_ids or []), message_id]))
+        active.save(update_fields=['extra_message_ids'])
         return
 
     pending_ids = list(customer.pending_chat_message_ids or [])
@@ -160,30 +158,10 @@ def start_request_flow(customer, request_type):
     customer.pending_request_type = request_type
     customer.save(update_fields=['state', 'pending_request_type', 'updated_at', 'last_seen_at'])
 
-    request_label = REQUEST_TYPE_LABELS.get(request_type, 'обращение')
-    sent_message = send_telegram_message_to_chat(
-        customer.telegram_id,
-        f'👋 Здравствуйте! Вы выбрали сценарий: {request_label}.\n\n✍️ Напишите, пожалуйста, что именно вас интересует. Это поможет оператору быстрее обработать запрос.',
-        reply_markup=get_close_request_keyboard(),
-    )
-    add_pending_chat_message_id(customer, sent_message.get('message_id'))
 
 
 def send_welcome(chat_id, customer=None):
-    sent_message = None
-
-    try:
-        sent_message = send_telegram_message_to_chat(
-            chat_id,
-            get_welcome_text(),
-            reply_markup=get_bot_main_menu(),
-        )
-    except Exception:
-        # Fallback to plain text if inline keyboard or Telegram response causes trouble.
-        sent_message = send_telegram_message_to_chat(
-            chat_id,
-            get_welcome_text(),
-        )
+    sent_message = send_telegram_message_to_chat(chat_id, get_welcome_text(), reply_markup=get_bot_main_menu())
 
     if customer and sent_message:
         add_pending_chat_message_id(customer, sent_message.get('message_id'))
@@ -201,7 +179,10 @@ def send_latest_price_to_customer(customer):
         send_telegram_message_to_chat(customer.telegram_id, '📭 Актуальный прайс пока не опубликован.')
         return
 
-    send_telegram_text_to_chat(customer.telegram_id, latest_publication.text)
+    send_telegram_text_to_chat(
+        customer.telegram_id, latest_publication.text,
+        on_sent=lambda message: add_pending_chat_message_id(customer, message['message_id']),
+    )
 
 
 def notify_operator_about_request(request_obj):
@@ -382,19 +363,11 @@ def get_active_customer_request(customer):
     return primary_request
 
 
-def close_active_customer_request(customer):
-    request_obj = get_active_customer_request(customer)
-    if not request_obj:
-        return None
-
-    request_obj.status = TelegramCustomerRequest.STATUS_DONE
-    request_obj.has_unread_customer_message = False
-    request_obj.unread_messages_count = 0
-    request_obj.save(update_fields=['status', 'has_unread_customer_message', 'unread_messages_count', 'updated_at'])
-    return request_obj
-
-
+@transaction.atomic
 def close_request_and_notify_customer(request_obj, text=CLOSE_REQUEST_TEXT):
+    request_obj = TelegramCustomerRequest.objects.select_for_update().get(pk=request_obj.pk)
+    if request_obj.status in [TelegramCustomerRequest.STATUS_DONE, TelegramCustomerRequest.STATUS_CANCELLED]:
+        return None
     if request_obj.status != TelegramCustomerRequest.STATUS_DONE:
         request_obj.status = TelegramCustomerRequest.STATUS_DONE
         request_obj.has_unread_customer_message = False
@@ -403,6 +376,7 @@ def close_request_and_notify_customer(request_obj, text=CLOSE_REQUEST_TEXT):
 
     sent_message = send_telegram_message_to_chat(request_obj.customer.telegram_id, text)
     schedule_request_chat_cleanup(request_obj, extra_message_ids=[sent_message.get('message_id')])
+    TelegramCustomer.objects.filter(pk=request_obj.customer_id).update(state='', pending_request_type='')
     return sent_message
 
 
@@ -413,7 +387,7 @@ def close_request_by_customer(request_obj, text):
         sender_type=TelegramCustomerMessage.SENDER_OPERATOR,
         update_request_state=False,
     )
-    notify_operator_about_request_closed(request_obj)
+    transaction.on_commit(lambda: _notify_operator_safely(request_obj, closed=True))
     return close_request_and_notify_customer(request_obj, text=text)
 
 
@@ -513,12 +487,18 @@ def create_or_append_customer_request(customer, text, telegram_message_id=None):
     customer.save(update_fields=['state', 'pending_request_type', 'updated_at', 'last_seen_at'])
 
     if is_new_request:
-        notify_operator_about_request(request_obj)
+        transaction.on_commit(lambda: _notify_operator_safely(request_obj))
     return request_obj
 
 
 def handle_callback_query(callback_query):
     data = callback_query.get('data', '')
+    data = {
+        'minimal:price': 'menu:price', 'minimal:close': 'menu:close_request',
+        'minimal:menu': 'menu:main', 'minimal:price_request': 'request:price',
+        'minimal:availability': 'request:availability', 'minimal:order': 'request:order',
+        'minimal:operator': 'request:question',
+    }.get(data, data)
     from_user = callback_query.get('from', {})
     customer = get_or_create_telegram_customer(from_user)
 
@@ -528,12 +508,12 @@ def handle_callback_query(callback_query):
         return
 
     if data == 'menu:close_request':
-        closed_request = close_active_customer_request(customer)
+        closed_request = get_active_customer_request(customer)
         answer_telegram_callback(callback_query['id'])
         if closed_request:
             close_request_by_customer(
                 closed_request,
-                text=f'✅ Заявка #{closed_request.id} закрыта. Через минуту чат будет очищен.',
+                text=f'✅ Заявка #{closed_request.id} закрыта. Сообщения будут удалены при ближайшей очистке.',
             )
         else:
             send_telegram_message_to_chat(
@@ -544,8 +524,16 @@ def handle_callback_query(callback_query):
 
     if data.startswith('request:'):
         request_type = data.split(':', 1)[1]
-        answer_telegram_callback(callback_query['id'])
+        if request_type not in REQUEST_TYPE_LABELS:
+            answer_telegram_callback(callback_query['id'])
+            return
+        answer_telegram_callback(callback_query['id'], text='Напишите сообщение для оператора.')
         start_request_flow(customer, request_type)
+        return
+
+    if data == 'menu:main':
+        answer_telegram_callback(callback_query['id'])
+        send_welcome(customer.telegram_id, customer)
         return
 
     answer_telegram_callback(callback_query['id'])
@@ -556,41 +544,74 @@ def handle_message(message):
     chat_id = message.get('chat', {}).get('id') or from_user.get('id')
     text = (message.get('text') or '').strip()
 
-    print(
-        'MINIMAL TELEGRAM BOT MESSAGE '
-        f'chat_id={chat_id} from_user={from_user.get("id")} text={text!r}',
-        flush=True,
-    )
-
-    if not chat_id:
+    if not chat_id or not from_user.get('id') or from_user.get('is_bot') or message.get('chat', {}).get('type') != 'private':
         return
-
-    if text.startswith('/start'):
-        send_telegram_message_to_chat(chat_id, 'Привет')
+    customer = get_or_create_telegram_customer(from_user)
+    command = text.split(maxsplit=1)[0].split('@')[0] if text else ''
+    if command in {'/start', '/menu'}:
+        parameter = text.split(maxsplit=1)[1] if ' ' in text else ''
+        request_type = {'price': 'price', 'order': 'order', 'question': 'question'}.get(parameter)
+        if request_type:
+            start_request_flow(customer, request_type)
+        send_welcome(chat_id, customer)
+        add_pending_chat_message_id(customer, message.get('message_id'))
+        transaction.on_commit(lambda: delete_customer_message(chat_id, message.get('message_id')))
         return
-
-    send_telegram_message_to_chat(
-        chat_id,
-        'Бот работает в минимальном режиме. Отправьте /start',
-    )
+    active = get_active_customer_request(customer)
+    if command == '/close':
+        if active:
+            if message.get('message_id'):
+                active.extra_message_ids = [*(active.extra_message_ids or []), message['message_id']]
+                active.save(update_fields=['extra_message_ids'])
+            close_request_by_customer(active, CLOSE_REQUEST_TEXT)
+        else:
+            send_telegram_message_to_chat(chat_id, 'Сейчас нет открытой заявки.')
+        return
+    if not text:
+        send_telegram_message_to_chat(chat_id, 'Пока поддерживаются текстовые сообщения. Опишите вопрос текстом.')
+        return
+    if active or customer.state == TelegramCustomer.STATE_AWAITING_REQUEST_TEXT:
+        created = active is None
+        request_obj = create_or_append_customer_request(customer, text, message.get('message_id'))
+        if created:
+            sent = send_telegram_message_to_chat(chat_id, f'Заявка #{request_obj.pk} передана оператору. Ответ придет в этот чат.')
+            request_obj.extra_message_ids = [*(request_obj.extra_message_ids or []), sent['message_id']]
+            request_obj.save(update_fields=['extra_message_ids'])
+        return
+    send_welcome(chat_id, customer)
 
 
 def handle_telegram_update(update):
-    print(
-        'MINIMAL TELEGRAM BOT UPDATE '
-        f'payload={json.dumps(update, ensure_ascii=False)[:2000]}',
-        flush=True,
-    )
+    update_id = update.get('update_id')
+    if not isinstance(update_id, int):
+        raise ValueError('Telegram update_id must be an integer')
+    with transaction.atomic():
+        record, _ = TelegramIncomingUpdate.objects.get_or_create(update_id=update_id)
+        record = TelegramIncomingUpdate.objects.select_for_update().get(pk=record.pk)
+        if record.processed_at:
+            return False
+        callback = update.get('callback_query')
+        message = update.get('message')
+        user = (callback or message or {}).get('from') or {}
+        chat = ((callback or {}).get('message') or message or {}).get('chat') or {}
+        if user.get('id') and not user.get('is_bot') and chat.get('type') == 'private':
+            customer = get_or_create_telegram_customer(user)
+            # Serialize different updates from the same customer, not only identical update IDs.
+            TelegramCustomer.objects.select_for_update().get(pk=customer.pk)
+            if callback:
+                handle_callback_query(callback)
+            elif message:
+                handle_message(message)
+        record.processed_at = timezone.now()
+        record.save(update_fields=['processed_at'])
+    return True
 
-    if update.get('callback_query'):
-        callback_query = update['callback_query']
-        print(
-            'MINIMAL TELEGRAM CALLBACK '
-            f'id={callback_query.get("id")} data={callback_query.get("data")!r}',
-            flush=True,
-        )
-        answer_telegram_callback(callback_query['id'], text='Бот в минимальном режиме')
-        return
 
-    if update.get('message'):
-        handle_message(update['message'])
+def _notify_operator_safely(request_obj, closed=False):
+    try:
+        if closed:
+            notify_operator_about_request_closed(request_obj)
+        else:
+            notify_operator_about_request(request_obj)
+    except Exception:
+        logging.getLogger(__name__).exception('Operator notification failed for request %s', request_obj.pk)

@@ -56,10 +56,9 @@ class Command(BaseCommand):
 
                 for update in updates:
                     update_id = update.get('update_id')
+                    handle_telegram_update(update)
                     if update_id is not None:
                         offset = update_id + 1
-
-                    handle_telegram_update(update)
 
             except KeyboardInterrupt:
                 self.stdout.write(self.style.WARNING('\nTelegram polling остановлен пользователем.'))

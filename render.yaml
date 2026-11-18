@@ -26,7 +26,7 @@ services:
       - key: DJANGO_SECURE_HSTS_SECONDS
         value: "31536000"
       - key: TELEGRAM_WEBHOOK_SECRET
-        generateValue: true
+        sync: false
       - key: DATABASE_URL
         sync: false
       - key: DEMO_ADMIN_USERNAME

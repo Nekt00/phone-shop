@@ -64,7 +64,7 @@ class AggregationPreservationTests(TestCase):
 
 
 class ReleaseSafetyTests(TestCase):
-    @patch('operators.views.process_due_cleanup_tasks')
+    @patch('operators.views.request_cleanup')
     def test_healthcheck_does_not_call_telegram_cleanup(self, cleanup):
         self.assertEqual(self.client.get('/healthz/').status_code, 200)
         cleanup.assert_not_called()
@@ -75,8 +75,8 @@ class ReleaseSafetyTests(TestCase):
         for name in ['env_debug', 'telegram_debug_log']:
             self.assertEqual(self.client.get(reverse('operators:' + name)).status_code, 302)
 
-    @patch('operators.views.send_telegram_messages', side_effect=ValueError('network failed'))
-    @patch('operators.views.delete_telegram_messages')
+    @patch('operators.publication_service.send_telegram_messages', side_effect=ValueError('network failed'))
+    @patch('operators.publication_service.delete_telegram_messages')
     def test_failed_publication_keeps_old_pricelist(self, delete, send):
         from .models import TelegramPublication
         publication = TelegramPublication.objects.create(kind='price', text='Old', message_ids=[1])

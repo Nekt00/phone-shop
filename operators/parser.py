@@ -1,5 +1,6 @@
 import re
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 
 
 class SmartParser:
@@ -118,8 +119,9 @@ class SmartParser:
         if self._is_missing(value):
             return None
 
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
+        if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+            price = Decimal(str(value))
+            return price if price.is_finite() else None
 
         text = self.normalize_text(value)
         if not text:
@@ -140,10 +142,10 @@ class SmartParser:
             cleaned = cleaned.replace(",", "")
 
         try:
-            return float(cleaned)
-        except Exception:
-            digits = re.sub(r"[^\d]", "", cleaned)
-            return float(digits) if digits else None
+            price = Decimal(cleaned)
+            return price if price.is_finite() else None
+        except InvalidOperation:
+            return None
 
     def detect_file_brand(self):
         """
@@ -610,24 +612,24 @@ class TextPriceParser:
 
     def extract_price(self, line):
         line = self.normalize_spaces(line)
-
-        parts = line.rsplit(' ', 1)
-        if len(parts) != 2:
+        match = re.search(
+            r'(?<!\S)(?P<amount>\d{1,3} \d{3}(?:[.,]\d{1,2})?|\d{3,}(?:[.,]\d{1,2})?)'
+            r'\s*(?P<currency>₽|руб\.?)?$',
+            line,
+            re.IGNORECASE,
+        )
+        if not match:
             return None, line
 
-        left, right = parts
-        price_digits = re.sub(r'\D', '', right)
-
-        if not price_digits:
+        amount = match.group('amount')
+        # Bare storage/model numbers must not become a price or a thousands group.
+        if not match.group('currency') and amount.split()[-1] in self.MEMORY_VALUES:
+            return None, line
+        remaining = self.normalize_spaces(line[:match.start()].rstrip('-').strip())
+        if not remaining:
             return None, line
 
-        # Не считаем короткие числа ценой: это чаще номер модели/диагональ,
-        # например "iPhone 15" или "SE 2 40".
-        if len(price_digits) < 3:
-            return None, line
-
-        price = float(price_digits)
-        remaining = self.normalize_spaces(left.rstrip('-').strip())
+        price = Decimal(amount.replace(' ', '').replace(',', '.'))
         return price, remaining
 
 

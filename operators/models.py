@@ -226,6 +226,19 @@ class OperatorPrice(models.Model):
         return f"{self.aggregated_product} — {self.price}"
 
 
+class TelegramPublicationMutex(models.Model):
+    """Singleton row used to serialize channel publications."""
+
+
+class CatalogRebuildMutex(models.Model):
+    """Singleton row used to serialize supplier snapshot rebuilds."""
+
+
+class TelegramIncomingUpdate(models.Model):
+    update_id = models.BigIntegerField(primary_key=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+
 class TelegramCustomer(models.Model):
     STATE_IDLE = ''
     STATE_AWAITING_REQUEST_TEXT = 'awaiting_request_text'

@@ -1,7 +1,8 @@
 import re
 from django.db import transaction
+from django.db.models import OuterRef, Subquery
 from django.utils import timezone
-from .models import Product, AggregatedProduct, ProductPrice
+from .models import Product, AggregatedProduct, ProductPrice, PriceList, CatalogRebuildMutex
 
 
 class Aggregator:
@@ -31,12 +32,20 @@ class Aggregator:
 
         try:
             with transaction.atomic():
+                CatalogRebuildMutex.objects.get_or_create(pk=1)
+                CatalogRebuildMutex.objects.select_for_update().get(pk=1)
                 ProductPrice.objects.all().delete()
 
                 today = timezone.localdate()
 
+                latest_pricelist = PriceList.objects.filter(
+                    supplier_id=OuterRef('supplier_id'),
+                    status='processed',
+                    uploaded_at__date=today,
+                ).order_by('-uploaded_at', '-pk').values('pk')[:1]
+
                 today_products = Product.objects.select_related('supplier', 'pricelist').filter(
-                    pricelist__uploaded_at__date=today
+                    pricelist_id=Subquery(latest_pricelist)
                 )
 
                 groups = {}

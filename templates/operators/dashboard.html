@@ -444,9 +444,12 @@
                         <td class="text-end">
                             <div class="d-inline-flex gap-2">
                                 {% if pricelist.status == 'new' %}
-                                    <a href="{% url 'operators:process_pricelist' pricelist.id %}" class="btn btn-sm btn-success">
+                                    <form method="post" action="{% url 'operators:process_pricelist' pricelist.id %}">
+                                        {% csrf_token %}
+                                        <button type="submit" class="btn btn-sm btn-success">
                                         <i class="bi bi-play-fill"></i> Обработать
-                                    </a>
+                                        </button>
+                                    </form>
                                 {% endif %}
                                 <form method="post" action="{% url 'operators:delete_pricelist' pricelist.id %}" class="d-inline"
                                       onsubmit="return confirm('Удалить прайс-лист от {{ pricelist.supplier.name }}?');">

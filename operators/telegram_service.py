@@ -77,7 +77,12 @@ def answer_telegram_callback(callback_query_id, text=''):
     }
     if text:
         payload['text'] = text
-    return _telegram_request('answerCallbackQuery', payload)
+    try:
+        return _telegram_request('answerCallbackQuery', payload)
+    except ValueError as exc:
+        if any(reason in str(exc).lower() for reason in ('query is too old', 'query id is invalid', 'response timeout expired')):
+            return False
+        raise
 
 
 def send_telegram_message_to_chat(chat_id, text, reply_markup=None):
@@ -90,7 +95,7 @@ def send_telegram_message_to_chat(chat_id, text, reply_markup=None):
     return _telegram_request('sendMessage', payload)
 
 
-def send_telegram_text_to_chat(chat_id, text, reply_markup=None, reply_markup_position='last'):
+def send_telegram_text_to_chat(chat_id, text, reply_markup=None, reply_markup_position='last', on_sent=None):
     messages = split_telegram_text(text)
     if not messages:
         raise ValueError('Нет текста для отправки')
@@ -120,14 +125,16 @@ def send_telegram_text_to_chat(chat_id, text, reply_markup=None, reply_markup_po
             'message_id': result['message_id'],
             'text': message,
         })
+        if on_sent is not None:
+            on_sent(sent_messages[-1])
 
     return sent_messages
 
 
-def send_telegram_messages(text, reply_markup=None):
+def send_telegram_messages(text, reply_markup=None, on_sent=None):
     chat_id = _get_telegram_chat_id()
 
-    return send_telegram_text_to_chat(chat_id, text, reply_markup=reply_markup)
+    return send_telegram_text_to_chat(chat_id, text, reply_markup=reply_markup, on_sent=on_sent)
 
 
 def send_telegram_photo(photo_file, caption=''):

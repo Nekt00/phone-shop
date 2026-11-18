@@ -17,6 +17,7 @@
    - `TELEGRAM_CHAT_ID`
    - `TELEGRAM_OPERATOR_CHAT_ID`
    - `TELEGRAM_BOT_USERNAME`
+   - `TELEGRAM_WEBHOOK_SECRET` — generate locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 4. After the first deploy, note the real Render URL and update:
    - `DJANGO_ALLOWED_HOSTS`
    - `DJANGO_CSRF_TRUSTED_ORIGINS`
@@ -28,6 +29,7 @@ Recommended webhook URL:
 `https://<your-render-domain>/operators/telegram-bot/webhook/`
 
 Set it together with `secret_token`, using the value of `TELEGRAM_WEBHOOK_SECRET`.
+The secret must contain only letters, digits, `_` and `-` (no `/` or `=`).
 
 Example:
 
@@ -47,7 +49,10 @@ Legacy secret-in-path URL also works:
   - or another free PostgreSQL provider
 - For a more stable demo with uploaded photos, move media to object storage or use a paid disk-backed service.
 - Delayed Telegram cleanup works in lazy mode on the free plan:
-  - cleanup is processed on webhook calls
-  - cleanup is also processed when operators open the app
+  - webhook/sidebar requests trigger a background cleanup thread; they do not wait for deletion
+  - polling processes the same durable cleanup queue
   - if the app has no traffic for some time, message cleanup can happen with delay
+  - retries back off; tasks stop automatic retries after five failures and remain in the database for inspection
+- Upgrade to v0.2.1 requires `python manage.py migrate` before starting webhook or polling.
+- Use PostgreSQL for multi-worker operation; SQLite is supported for local single-user previews only.
 - On the free plan Render does not support `preDeployCommand`, so database migrations run inside the web service start command.

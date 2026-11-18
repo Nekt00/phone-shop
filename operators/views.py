@@ -1,12 +1,10 @@
 import json
 import logging
 import tempfile
-import traceback
 from pathlib import Path
 from secrets import compare_digest
 
 from django.conf import settings
-from django.core.cache import cache
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.contrib.admin.views.decorators import staff_member_required
@@ -26,7 +24,6 @@ from .models import (
     ProductPrice,
     TelegramPublication,
     OperatorPrice,
-    TelegramCustomer,
     TelegramCustomerMessage,
     TelegramCustomerRequest,
 )
@@ -34,23 +31,18 @@ from django.views.decorators.http import require_POST
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.cache import never_cache
 from .telegram_service import (
-    answer_telegram_callback,
     send_telegram_messages,
     send_telegram_photo,
-    delete_telegram_messages,
-    send_telegram_message_to_chat,
-    send_operator_notification,
 )
 from django.contrib.auth import logout
-from .telegram_bot import get_active_customer_request, get_channel_entry_keyboard, handle_telegram_update
-from .telegram_bot import close_request_and_notify_customer, close_request_by_customer
+from .telegram_bot import get_active_customer_request, handle_telegram_update
+from .telegram_bot import close_request_and_notify_customer
 from .telegram_bot import send_request_message
-from .telegram_cleanup import process_due_cleanup_tasks
+from .telegram_cleanup import request_cleanup
 # Create your views here.
 
 logger = logging.getLogger(__name__)
 TELEGRAM_DEBUG_LOG_PATH = Path(tempfile.gettempdir()) / 'telegram_webhook_debug.log'
-TELEGRAM_UPDATE_CACHE_TTL = 60 * 15
 
 
 def _append_telegram_debug_log(message):
@@ -71,212 +63,6 @@ def _mask_secret(value, keep_start=6, keep_end=4):
     return f'{value[:keep_start]}...{value[-keep_end:]}'
 
 
-def _minimal_bot_welcome_text():
-    return (
-        '👋 Здравствуйте!\n\n'
-        'Бот снова в сети. Сейчас работает безопасный режим без заявок, '
-        'но уже можно открыть меню и проверить кнопки.'
-    )
-
-
-def _minimal_bot_menu():
-    return {
-        'inline_keyboard': [
-            [
-                {'text': '📋 Смотреть прайс', 'callback_data': 'minimal:price'},
-            ],
-            [
-                {'text': '💵 Уточнить цену', 'callback_data': 'minimal:price_request'},
-                {'text': '📦 Уточнить наличие', 'callback_data': 'minimal:availability'},
-            ],
-            [
-                {'text': '🛒 Оформить заказ', 'callback_data': 'minimal:order'},
-                {'text': '👨‍💼 Связаться с оператором', 'callback_data': 'minimal:operator'},
-            ],
-            [
-                {'text': '✅ Закрыть заявку', 'callback_data': 'minimal:close'},
-            ],
-        ]
-    }
-
-
-def _minimal_bot_callback_reply(callback_data):
-    replies = {
-        'minimal:price': 'Прайс будет возвращен на следующем этапе восстановления.',
-        'minimal:price_request': 'Напишите модель или вопрос по цене одним сообщением.',
-        'minimal:availability': 'Напишите модель или вопрос по наличию одним сообщением.',
-        'minimal:order': 'Напишите, что хотите заказать, одним сообщением.',
-        'minimal:operator': 'Напишите сообщение для оператора одним сообщением.',
-        'minimal:menu': _minimal_bot_welcome_text(),
-        'minimal:close': 'Заявка закрыта. Если понадобится, откройте меню снова.',
-    }
-    return replies.get(callback_data, 'Кнопка получена. Бот работает в безопасном режиме.')
-
-
-def _minimal_upsert_telegram_customer(user_data):
-    telegram_id = user_data.get('id')
-    if not telegram_id:
-        return None
-
-    defaults = {
-        'username': user_data.get('username', '') or '',
-        'first_name': user_data.get('first_name', '') or '',
-        'last_name': user_data.get('last_name', '') or '',
-        'language_code': user_data.get('language_code', '') or '',
-    }
-    customer, created = TelegramCustomer.objects.get_or_create(
-        telegram_id=telegram_id,
-        defaults=defaults,
-    )
-
-    if not created:
-        changed_fields = []
-        for field, value in defaults.items():
-            if getattr(customer, field) != value:
-                setattr(customer, field, value)
-                changed_fields.append(field)
-        if changed_fields:
-            changed_fields.extend(['updated_at', 'last_seen_at'])
-            customer.save(update_fields=changed_fields)
-        else:
-            customer.save(update_fields=['updated_at', 'last_seen_at'])
-
-    return customer
-
-
-def _minimal_request_type_label(request_type):
-    labels = {
-        TelegramCustomerRequest.TYPE_PRICE: 'цене',
-        TelegramCustomerRequest.TYPE_AVAILABILITY: 'наличию',
-        TelegramCustomerRequest.TYPE_ORDER: 'заказу',
-        TelegramCustomerRequest.TYPE_QUESTION: 'сообщению',
-    }
-    return labels.get(request_type, 'запросу')
-
-
-def _minimal_start_request_capture(customer, request_type):
-    customer.state = TelegramCustomer.STATE_AWAITING_REQUEST_TEXT
-    customer.pending_request_type = request_type
-    customer.save(update_fields=['state', 'pending_request_type', 'updated_at', 'last_seen_at'])
-
-
-def _minimal_append_pending_message_id(customer, sent_message):
-    if not customer or not sent_message:
-        return
-
-    message_id = sent_message.get('message_id') if isinstance(sent_message, dict) else None
-    if not message_id:
-        return
-
-    pending_ids = list(customer.pending_chat_message_ids or [])
-    if message_id in pending_ids:
-        return
-
-    pending_ids.append(message_id)
-    customer.pending_chat_message_ids = pending_ids
-    customer.save(update_fields=['pending_chat_message_ids', 'updated_at', 'last_seen_at'])
-
-
-def _minimal_get_active_request(customer):
-    return customer.requests.exclude(
-        status__in=[TelegramCustomerRequest.STATUS_DONE, TelegramCustomerRequest.STATUS_CANCELLED]
-    ).order_by('created_at', 'id').first()
-
-
-def _minimal_close_active_request(customer):
-    active_request = _minimal_get_active_request(customer)
-    if not active_request:
-        return None
-
-    active_request.status = TelegramCustomerRequest.STATUS_DONE
-    active_request.has_unread_customer_message = False
-    active_request.unread_messages_count = 0
-    active_request.save(update_fields=['status', 'has_unread_customer_message', 'unread_messages_count', 'updated_at'])
-
-    customer.state = TelegramCustomer.STATE_IDLE
-    customer.pending_request_type = ''
-    customer.save(update_fields=['state', 'pending_request_type', 'updated_at', 'last_seen_at'])
-
-    return active_request
-
-
-def _minimal_append_extra_message_id(request_obj, sent_message):
-    if not request_obj or not sent_message:
-        return
-
-    message_id = sent_message.get('message_id') if isinstance(sent_message, dict) else None
-    if not message_id:
-        return
-
-    extra_ids = list(request_obj.extra_message_ids or [])
-    if message_id in extra_ids:
-        return
-
-    extra_ids.append(message_id)
-    request_obj.extra_message_ids = extra_ids
-    request_obj.save(update_fields=['extra_message_ids', 'updated_at'])
-
-
-def _minimal_create_or_append_request(customer, text, telegram_message_id=None):
-    cleaned_text = (text or '').strip()
-    request_type = customer.pending_request_type or ''
-    active_request = _minimal_get_active_request(customer)
-    created = active_request is None
-
-    if active_request is None:
-        request_type = request_type or TelegramCustomerRequest.TYPE_QUESTION
-        publication = TelegramPublication.objects.filter(
-            kind=TelegramPublication.KIND_PRICE,
-            is_active=True,
-        ).first()
-        pending_message_ids = list(customer.pending_chat_message_ids or [])
-        active_request = TelegramCustomerRequest.objects.create(
-            customer=customer,
-            request_type=request_type,
-            status=TelegramCustomerRequest.STATUS_NEW,
-            publication=publication,
-            product_query=cleaned_text,
-            client_message=cleaned_text,
-            telegram_message_id=telegram_message_id,
-            has_unread_customer_message=True,
-            unread_messages_count=1,
-            extra_message_ids=pending_message_ids,
-        )
-        if pending_message_ids:
-            customer.pending_chat_message_ids = []
-            customer.save(update_fields=['pending_chat_message_ids', 'updated_at', 'last_seen_at'])
-    else:
-        active_request.client_message = cleaned_text
-        active_request.has_unread_customer_message = True
-        active_request.unread_messages_count = (active_request.unread_messages_count or 0) + 1
-        if request_type:
-            active_request.request_type = request_type
-        if not active_request.product_query:
-            active_request.product_query = cleaned_text
-        active_request.save(
-            update_fields=[
-                'request_type',
-                'client_message',
-                'has_unread_customer_message',
-                'unread_messages_count',
-                'product_query',
-                'updated_at',
-            ]
-        )
-
-    TelegramCustomerMessage.objects.create(
-        request=active_request,
-        sender_type=TelegramCustomerMessage.SENDER_CUSTOMER,
-        text=cleaned_text,
-        telegram_message_id=telegram_message_id,
-    )
-
-    customer.state = TelegramCustomer.STATE_IDLE
-    customer.pending_request_type = ''
-    customer.save(update_fields=['state', 'pending_request_type', 'updated_at', 'last_seen_at'])
-
-    return active_request, created
-
 def index(request):
     """Главная страница - перенаправляем на кабинет оператора"""
     return redirect('operators:dashboard')
@@ -287,7 +73,7 @@ def healthz(request):
 
 
 def _get_sidebar_counts():
-    process_due_cleanup_tasks(limit=10)
+    request_cleanup()
     active_requests = TelegramCustomerRequest.objects.exclude(
         status__in=[TelegramCustomerRequest.STATUS_DONE, TelegramCustomerRequest.STATUS_CANCELLED]
     )
@@ -426,12 +212,12 @@ def _prepare_telegram_requests_data(mark_read=False):
         item.has_unread_customer_message = bool(item.has_unread_customer_message)
         item.should_highlight = (item.unread_messages_count or 0) > 0 or item.status == TelegramCustomerRequest.STATUS_NEW
 
-    unread_ids = [item.id for item in active_requests if item.has_unread_customer_message or (item.unread_messages_count or 0) > 0]
-    if mark_read and unread_ids:
-        TelegramCustomerRequest.objects.filter(id__in=unread_ids).update(
-            has_unread_customer_message=False,
-            unread_messages_count=0,
-        )
+    if mark_read:
+        for item in active_requests:
+            if item.has_unread_customer_message or item.unread_messages_count:
+                TelegramCustomerRequest.objects.filter(pk=item.pk, updated_at=item.updated_at).update(
+                    has_unread_customer_message=False, unread_messages_count=0,
+                )
 
     active_requests.sort(
         key=lambda item: (
@@ -450,7 +236,7 @@ def _prepare_telegram_requests_data(mark_read=False):
         'new_requests_count': sum(1 for item in active_requests if item.status == TelegramCustomerRequest.STATUS_NEW),
         'in_progress_requests_count': sum(1 for item in active_requests if item.status == TelegramCustomerRequest.STATUS_IN_PROGRESS),
         'archived_requests_count': len(archived_requests),
-        'sidebar_new_requests_count': 0 if mark_read else sum((item.unread_messages_count or 0) for item in active_requests),
+        'sidebar_new_requests_count': sidebar_counts['new_requests_count'],
         'sidebar_in_progress_requests_count': sum(
             1 for item in active_requests if item.status == TelegramCustomerRequest.STATUS_IN_PROGRESS
         ),
@@ -472,7 +258,7 @@ def _parse_price_value(value):
     except InvalidOperation:
         return None
 
-    if price <= 0:
+    if not price.is_finite() or price <= 0 or price >= Decimal('100000000'):
         return None
 
     return price.quantize(Decimal('1.00'))
@@ -771,7 +557,7 @@ def upload_pricelist(request):
             messages.success(request, f'✅ Файл загружен: {file.name}')
             
             # Сразу обрабатываем
-            return redirect('operators:process_pricelist', pricelist_id=pricelist.id)
+            return process_pricelist(request, pricelist.id)
         
         # Загрузка текста
         elif upload_type == 'text':
@@ -780,48 +566,14 @@ def upload_pricelist(request):
                 messages.error(request, 'Введите текст прайс-листа')
                 return redirect('operators:upload_pricelist')
 
-            # Парсим текст
-            from .parser import TextPriceParser
-            from .aggregator import Aggregator
-
-            parser = TextPriceParser(text)
-            products_data = parser.parse()
-
-            if not products_data:
-                messages.warning(request, 'Не найдено товаров в тексте')
-                return redirect('operators:dashboard')
-
-            # Создаем запись прайс-листа для текста
-            pricelist = PriceList.objects.create(
-                supplier=supplier,
-                uploaded_by=request.user,
-                status='processed'
-            )
-
-            # Сохраняем товары
-            saved = 0
-            for item in products_data:
-                Product.objects.create(
-                    supplier=supplier,
-                    pricelist=pricelist,
-                    category=item.get('category', ''),
-                    brand=item.get('brand', ''),
-                    model=item.get('model', ''),
-                    color=item.get('color', ''),
-                    memory=item.get('memory', ''),
-                    region=item.get('region', ''),
-                    sim_type=item.get('sim_type', ''),
-                    specs=item.get('specs', ''),
-                    price=item['price']
-                )
-                saved += 1
-
-
-            messages.success(request, f'✅ Обработано {saved} товаров из текста')
-
-            agg_results = Aggregator.aggregate_all()
-            messages.info(request, f'📊 Создано {agg_results["aggregated"]} уникальных товаров')
-
+            from .import_service import import_text
+            try:
+                saved = import_text(supplier, text, request.user)
+            except Exception:
+                logger.exception('Text price import failed for supplier %s', supplier.pk)
+                messages.error(request, 'Прайс не импортирован. Проверьте формат и цены; изменения отменены.')
+                return redirect('operators:upload_pricelist')
+            messages.success(request, f'Обработано товаров: {saved}')
             return redirect('operators:dashboard')
 
     
@@ -859,60 +611,18 @@ def clear_catalog_view(request):
 
 
 @login_required
+@require_POST
 def process_pricelist(request, pricelist_id):
-    """Обработка прайс-листа умным парсером"""
-    pricelist = get_object_or_404(PriceList, id=pricelist_id)
-    
+    """Import a saved file once, rolling back all catalog writes on failure."""
+    from .import_service import import_saved_file
+    pricelist = get_object_or_404(PriceList, pk=pricelist_id)
     try:
-        from .parser import SmartParser
-        from .aggregator import Aggregator
-
-        pricelist.status = 'processing'
-        pricelist.save()
-        
-        # Создаём парсер
-        parser = SmartParser(pricelist.file.path)
-        products_data = parser.parse()
-        
-        if not products_data:
-            messages.warning(request, 'Не найдено товаров в файле')
-            pricelist.status = 'error'
-            pricelist.save()
-            return redirect('operators:dashboard')
-        
-        # Сохраняем товары
-        saved = 0
-        for item in products_data:
-            Product.objects.create(
-                supplier=pricelist.supplier,
-                pricelist=pricelist,
-                category=item.get('category', ''),
-                brand=item.get('brand', ''),
-                model=item.get('model', ''),
-                color=item.get('color', ''),
-                memory=item.get('memory', ''),
-                region=item.get('region', ''),
-                sim_type=item.get('sim_type', ''),
-                specs=item.get('specs', ''),
-                price=item['price']
-            )
-            saved += 1
-
-
-        pricelist.status = 'processed'
-        pricelist.save()
-        
-        messages.success(request, f'✅ Обработано {saved} товаров')
-        
-        # Запускаем агрегацию
-        agg_results = Aggregator.aggregate_all()
-        messages.info(request, f'📊 Создано {agg_results["aggregated"]} уникальных товаров')
-        
-    except Exception as e:
-        pricelist.status = 'error'
-        pricelist.save()
-        messages.error(request, f'❌ Ошибка: {str(e)}')
-    
+        saved = import_saved_file(pricelist.pk)
+        messages.success(request, f'Обработано товаров: {saved}' if saved else 'Этот прайс уже обработан.')
+    except Exception:
+        PriceList.objects.filter(pk=pricelist.pk).exclude(status='processed').update(status='error')
+        logger.exception('File price import failed for pricelist %s', pricelist.pk)
+        messages.error(request, 'Прайс не импортирован. Проверьте файл; изменения отменены.')
     return redirect('operators:dashboard')
 
 
@@ -1222,39 +932,13 @@ def send_telegram_pricelist(request):
         messages.error(request, 'Нет текста для отправки в Telegram')
         return redirect('operators:telegram_price_builder')
 
+    from .publication_service import publish_pricelist
     try:
-        active_publications = list(
-            TelegramPublication.objects.filter(
-                kind=TelegramPublication.KIND_PRICE,
-                is_active=True
-            )
-        )
-
-        sent_messages = send_telegram_messages(text, reply_markup=get_channel_entry_keyboard())
-        TelegramPublication.objects.create(
-            kind=TelegramPublication.KIND_PRICE,
-            text=text,
-            message_ids=[item['message_id'] for item in sent_messages],
-            sent_by=request.user,
-            is_active=True,
-        )
-
-        deleted_count = 0
-        for publication in active_publications:
-            publication.is_active = False
-            publication.save(update_fields=['is_active'])
-            try:
-                if publication.message_ids:
-                    deleted_count += delete_telegram_messages(publication.message_ids)
-            except Exception:
-                logger.exception('Could not remove previous Telegram publication %s', publication.pk)
-                messages.warning(request, 'Новый прайс опубликован, но предыдущий не удалось удалить.')
-
-        if deleted_count:
-            messages.info(request, f'Удалено предыдущих сообщений прайса: {deleted_count}')
-        messages.success(request, f'Прайс отправлен в Telegram: {len(sent_messages)} сообщ.')
-    except Exception as e:
-        messages.error(request, f'Ошибка отправки в Telegram: {e}')
+        publication = publish_pricelist(text, request.user)
+        messages.success(request, f'Прайс отправлен в Telegram: {len(publication.message_ids)} сообщ.')
+    except Exception:
+        logger.exception('Telegram price publication failed')
+        messages.error(request, 'Не удалось полностью отправить прайс. Предыдущая публикация сохранена.')
 
     return redirect('operators:telegram_price_builder')
 
@@ -1300,11 +984,6 @@ def app_logout(request):
     logout(request)
     messages.success(request, 'Вы вышли из системы')
     return redirect('/login/')
-
-
-@login_required
-def ui_preview(request):
-    return render(request, 'operators/ui_preview.html')
 
 
 @staff_member_required
@@ -1367,220 +1046,26 @@ def telegram_bot_webhook(request, webhook_secret=''):
 
     try:
         payload = json.loads(request.body.decode('utf-8') or '{}')
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         _append_telegram_debug_log('invalid_json')
         return JsonResponse({'ok': False, 'error': 'invalid_json'}, status=400)
 
+    if not isinstance(payload, dict) or not isinstance(payload.get('update_id'), int):
+        return JsonResponse({'ok': False, 'error': 'invalid_update'}, status=400)
     _append_telegram_debug_log(
         'webhook_received '
         f'update_id={payload.get("update_id")} keys={list(payload.keys())}'
     )
 
-    update_id = payload.get('update_id')
-    if update_id is not None:
-        cache_key = f'telegram-webhook-update:{update_id}'
-        if cache.get(cache_key):
-            _append_telegram_debug_log(f'webhook_duplicate_ignored update_id={update_id}')
-            return JsonResponse({'ok': True, 'duplicate': True})
-        cache.set(cache_key, True, TELEGRAM_UPDATE_CACHE_TTL)
-
     try:
-        if payload.get('callback_query'):
-            callback_query = payload['callback_query']
-            callback_id = callback_query.get('id')
-            callback_data = callback_query.get('data', '')
-            callback_message = callback_query.get('message') or {}
-            callback_chat = callback_message.get('chat') or {}
-            callback_chat_id = callback_chat.get('id')
-            callback_user = callback_query.get('from') or {}
-            _append_telegram_debug_log(
-                f'callback_received id={callback_id} data={callback_data!r}'
-            )
-            if callback_chat_id:
-                customer = _minimal_upsert_telegram_customer(callback_user)
-                if callback_data == 'minimal:price_request' and customer:
-                    _minimal_start_request_capture(customer, TelegramCustomerRequest.TYPE_PRICE)
-                    if callback_id:
-                        answer_telegram_callback(callback_id, text='Напишите модель или вопрос по цене.')
-                        _append_telegram_debug_log(f'callback_answered id={callback_id} mode=ephemeral')
-                    return JsonResponse({'ok': True, 'mode': 'minimal'})
-                elif callback_data == 'minimal:availability' and customer:
-                    _minimal_start_request_capture(customer, TelegramCustomerRequest.TYPE_AVAILABILITY)
-                    if callback_id:
-                        answer_telegram_callback(callback_id, text='Напишите модель или вопрос по наличию.')
-                        _append_telegram_debug_log(f'callback_answered id={callback_id} mode=ephemeral')
-                    return JsonResponse({'ok': True, 'mode': 'minimal'})
-                elif callback_data == 'minimal:order' and customer:
-                    _minimal_start_request_capture(customer, TelegramCustomerRequest.TYPE_ORDER)
-                    if callback_id:
-                        answer_telegram_callback(callback_id, text='Напишите, что хотите заказать.')
-                        _append_telegram_debug_log(f'callback_answered id={callback_id} mode=ephemeral')
-                    return JsonResponse({'ok': True, 'mode': 'minimal'})
-                elif callback_data == 'minimal:operator' and customer:
-                    _minimal_start_request_capture(customer, TelegramCustomerRequest.TYPE_QUESTION)
-                    if callback_id:
-                        answer_telegram_callback(callback_id, text='Напишите сообщение для оператора.')
-                        _append_telegram_debug_log(f'callback_answered id={callback_id} mode=ephemeral')
-                    return JsonResponse({'ok': True, 'mode': 'minimal'})
-                elif callback_data == 'minimal:close' and customer:
-                    active_request = _minimal_get_active_request(customer)
-                    if active_request:
-                        if callback_id:
-                            answer_telegram_callback(callback_id)
-                            _append_telegram_debug_log(f'callback_answered id={callback_id} mode=silent')
-                        close_request_by_customer(
-                            active_request,
-                            text=f'✅ Заявка #{active_request.id} закрыта. Через минуту чат будет очищен.',
-                        )
-                        customer.state = TelegramCustomer.STATE_IDLE
-                        customer.pending_request_type = ''
-                        customer.save(update_fields=['state', 'pending_request_type', 'updated_at', 'last_seen_at'])
-                        _append_telegram_debug_log(
-                            f'callback_close_processed request_id={active_request.id} chat_id={callback_chat_id}'
-                        )
-                    else:
-                        if callback_id:
-                            answer_telegram_callback(callback_id, text='Сейчас нет открытой заявки.')
-                            _append_telegram_debug_log(f'callback_answered id={callback_id} mode=ephemeral')
-                    return JsonResponse({'ok': True, 'mode': 'minimal'})
-
-                reply_text = _minimal_bot_callback_reply(callback_data)
-                if callback_id and callback_data == 'minimal:price':
-                    answer_telegram_callback(callback_id, text=reply_text)
-                    _append_telegram_debug_log(f'callback_answered id={callback_id} mode=ephemeral')
-                    return JsonResponse({'ok': True, 'mode': 'minimal'})
-
-                if callback_id:
-                    answer_telegram_callback(callback_id)
-                    _append_telegram_debug_log(f'callback_answered id={callback_id} mode=silent')
-                reply_markup = _minimal_bot_menu() if callback_data == 'minimal:menu' else None
-                sent_message = send_telegram_message_to_chat(callback_chat_id, reply_text, reply_markup=reply_markup)
-                active_request = _minimal_get_active_request(customer) if customer else None
-                if active_request:
-                    _minimal_append_extra_message_id(active_request, sent_message)
-                elif customer:
-                    _minimal_append_pending_message_id(customer, sent_message)
-                _append_telegram_debug_log(
-                    f'callback_message_sent chat_id={callback_chat_id} reply={reply_text!r}'
-                )
-            return JsonResponse({'ok': True, 'mode': 'minimal'})
-
-        message = payload.get('message') or {}
-        chat = message.get('chat') or {}
-        from_user = message.get('from') or {}
-        chat_id = chat.get('id') or from_user.get('id')
-        text = (message.get('text') or '').strip()
-        customer = _minimal_upsert_telegram_customer(from_user)
-        bot_reply_sent = False
-
-        _append_telegram_debug_log(
-            f'message_received chat_id={chat_id} from_user={from_user.get("id")} text={text!r}'
-        )
-
-        if not chat_id:
-            _append_telegram_debug_log('message_skipped_no_chat_id')
-            return JsonResponse({'ok': True, 'mode': 'minimal'})
-
-        if text.startswith('/start'):
-            start_param = text.split(maxsplit=1)[1].strip() if ' ' in text else ''
-            reply_text = _minimal_bot_welcome_text()
-            if start_param == 'price':
-                reply_text += '\n\nОткрыт сценарий: прайс / цена и наличие.'
-                if customer:
-                    _minimal_start_request_capture(customer, TelegramCustomerRequest.TYPE_PRICE)
-            elif start_param == 'order':
-                reply_text += '\n\nОткрыт сценарий: оформление заказа.'
-                if customer:
-                    _minimal_start_request_capture(customer, TelegramCustomerRequest.TYPE_ORDER)
-            elif start_param == 'question':
-                reply_text += '\n\nОткрыт сценарий: связь с оператором.'
-                if customer:
-                    _minimal_start_request_capture(customer, TelegramCustomerRequest.TYPE_QUESTION)
-
-            sent_message = send_telegram_message_to_chat(chat_id, reply_text, reply_markup=_minimal_bot_menu())
-            if customer:
-                _minimal_append_pending_message_id(customer, sent_message)
-            bot_reply_sent = True
-        elif text.startswith('/menu'):
-            reply_text = _minimal_bot_welcome_text()
-            sent_message = send_telegram_message_to_chat(chat_id, reply_text, reply_markup=_minimal_bot_menu())
-            active_request = _minimal_get_active_request(customer) if customer else None
-            if active_request:
-                _minimal_append_extra_message_id(active_request, sent_message)
-            elif customer:
-                _minimal_append_pending_message_id(customer, sent_message)
-            bot_reply_sent = True
-        elif text.startswith('/close'):
-            active_request = _minimal_get_active_request(customer) if customer else None
-            if active_request:
-                close_request_by_customer(
-                    active_request,
-                    text=f'✅ Заявка #{active_request.id} закрыта. Через минуту чат будет очищен.',
-                )
-                customer.state = TelegramCustomer.STATE_IDLE
-                customer.pending_request_type = ''
-                customer.save(update_fields=['state', 'pending_request_type', 'updated_at', 'last_seen_at'])
-                reply_text = f'✅ Заявка #{active_request.id} закрыта. Через минуту чат будет очищен.'
-            else:
-                reply_text = 'ℹ️ Сейчас нет открытой заявки.'
-                send_telegram_message_to_chat(chat_id, reply_text)
-                bot_reply_sent = True
-        elif customer and (
-            customer.state == TelegramCustomer.STATE_AWAITING_REQUEST_TEXT
-            or _minimal_get_active_request(customer) is not None
-        ):
-            request_obj, created = _minimal_create_or_append_request(
-                customer,
-                text,
-                telegram_message_id=message.get('message_id'),
-            )
-            if created:
-                reply_text = (
-                    f'📨 Сообщение сохранено в заявку #{request_obj.id}.\n'
-                    f'Передали оператору информацию по {_minimal_request_type_label(request_obj.request_type)}.'
-                )
-                sent_message = send_telegram_message_to_chat(chat_id, reply_text)
-                _minimal_append_extra_message_id(request_obj, sent_message)
-                bot_reply_sent = True
-            else:
-                reply_text = 'message_appended_without_bot_reply'
-        else:
-            reply_text = 'Бот работает в безопасном режиме. Нажмите /start, чтобы открыть меню.'
-            send_telegram_message_to_chat(chat_id, reply_text)
-            bot_reply_sent = True
-
-        if bot_reply_sent:
-            _append_telegram_debug_log(
-                f'message_sent chat_id={chat_id} reply={reply_text!r}'
-            )
-        else:
-            _append_telegram_debug_log(
-                f'message_appended chat_id={chat_id} request_continues=True'
-            )
-    except Exception as exc:
-        logger.exception(
-            'Telegram webhook failed. update_id=%s keys=%s',
-            payload.get('update_id'),
-            list(payload.keys()),
-        )
-        _append_telegram_debug_log(
-            'webhook_error '
-            f'update_id={payload.get("update_id")} error={exc!r}\n{traceback.format_exc()}'
-        )
-        try:
-            operator_chat_id = getattr(settings, 'TELEGRAM_OPERATOR_CHAT_ID', '').strip()
-            public_chat_id = getattr(settings, 'TELEGRAM_CHAT_ID', '').strip()
-            if operator_chat_id and operator_chat_id != public_chat_id:
-                send_operator_notification(
-                    'Webhook error on Render\n'
-                    f'update_id={payload.get("update_id")}\n'
-                    f'error={exc!r}'
-                )
-        except Exception:
-            pass
+        processed = handle_telegram_update(payload)
+    except Exception:
+        logger.exception('Telegram webhook failed for update %s', payload.get('update_id'))
+        _append_telegram_debug_log(f'webhook_error update_id={payload.get("update_id")}')
         return JsonResponse({'ok': False, 'error': 'internal_error'}, status=500)
-
-    return JsonResponse({'ok': True})
+    _append_telegram_debug_log(f'webhook_processed update_id={payload["update_id"]} duplicate={not processed}')
+    request_cleanup()
+    return JsonResponse({'ok': True, 'duplicate': not processed})
 
 
 @login_required
@@ -1623,8 +1108,12 @@ def telegram_requests(request):
             )
             messages.success(request, 'Ответ отправлен клиенту в Telegram')
         elif action == 'mark_done':
-            close_request_and_notify_customer(customer_request)
-            messages.success(request, 'Обращение закрыто')
+            try:
+                close_request_and_notify_customer(customer_request)
+                messages.success(request, 'Обращение закрыто')
+            except Exception:
+                logger.exception('Could not close Telegram request %s', customer_request.pk)
+                messages.error(request, 'Не удалось уведомить клиента. Попробуйте закрыть заявку еще раз.')
 
         return redirect('operators:telegram_requests')
 
